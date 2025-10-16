@@ -1,111 +1,273 @@
 import sys
 import subprocess
 import importlib
-import time
-import requests
-import os
+import platform
 import threading
-from datetime import datetime
+import traceback
+import requests
+import json
+import os
+import shutil
+import tarfile
+import zipfile
 from pathlib import Path
+from datetime import datetime
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QComboBox, QPushButton, QTextEdit, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox
+    QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton,
+    QListWidget, QListWidgetItem, QTextEdit, QMessageBox, QHBoxLayout,
+    QInputDialog
 )
 from PyQt5.QtCore import Qt
 
-# 自动安装依赖模块
-def ensure_package(pkg_name):
+# --------- 依赖检测与安装 ---------
+def run_cmd(cmd):
     try:
-        importlib.import_module(pkg_name)
+        r = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return r.returncode == 0, r.stdout + r.stderr
+    except Exception as e:
+        return False, str(e)
+
+def ensure_package(pkg):
+    try:
+        importlib.import_module(pkg)
+        return True
     except ImportError:
-        print(f"{pkg_name} 未检测到，自动安装中...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg_name])
-        print(f"{pkg_name} 安装完成，请重启程序。")
-        sys.exit(0)
+        # 仅pip安装作为备用，推荐预装或用系统包管理器安装
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+        return True
 
 def ensure_dependencies():
-    for pkg in ["PyQt5", "requests"]:
-        ensure_package(pkg)
+    for p in ['PyQt5', 'requests']:
+        if not ensure_package(p):
+            print(f"依赖 {p} 安装失败")
+            sys.exit(1)
 
 ensure_dependencies()
 
-# Proxy管理器，包含多个代理自动检测与手动输入支持
+# --------- 代理管理 ---------
 class ProxyManager:
-    def __init__(self, ui_parent: QWidget):
-        self.ui_parent = ui_parent
+    def __init__(self, parent):
+        self.parent = parent
+        # 优先使用指定有效代理列表
         self.proxy_list = [
-            {"name": "GitHubProxy", "prefix": "https://ghproxy.com/"},
-            {"name": "FastGit", "prefix": "https://hub.fastgit.org/"},
-            {"name": "CNPMJS", "prefix": "https://github.com.cnpmjs.org/"}
+            {"name": "GitHubProxy", "prefix": "https://gh-proxy.com/"},
+            {"name": "FastGit", "prefix": "https://gh.jasonzeng.dev/"},
+            {"name": "pipers", "prefix": "https://proxy.pipers.cn/"},
+            {"name": "gitmirror", "prefix": "https://hub.gitmirror.com/"},
+            {"name": "dgithub", "prefix": "https://dgithub.xyz/"}
         ]
-        self.current_proxy_prefix = None
+        self.current_proxy = None
 
-    def test_proxy(self, proxy_prefix):
-        test_url = "https://api.github.com/repos/jedisct1/dnscrypt-proxy/releases/latest"
-        proxied_url = proxy_prefix + test_url
+    def test_proxy(self, prefix):
+        test_url = prefix + "https://api.github.com/repos/DNSCrypt/dnscrypt-proxy/releases/latest"
         try:
-            resp = requests.get(proxied_url, timeout=5)
-            return resp.status_code == 200
-        except Exception:
+            r = requests.get(test_url, timeout=7)
+            return r.status_code == 200
+        except:
             return False
 
-    def auto_select_proxy(self):
-        for proxy in self.proxy_list:
-            if self.test_proxy(proxy["prefix"]):
-                self.current_proxy_prefix = proxy["prefix"]
-                self.ui_parent.log(f"自动选择有效代理: {proxy['name']}")
+    def auto_detect(self):
+        for p in self.proxy_list:
+            if self.test_proxy(p["prefix"]):
+                self.current_proxy = p["prefix"]
+                self.parent.log(f"自动选用代理：{p['name']}")
                 return True
-        # 所有检测失败，弹窗输入
-        return self.manual_proxy_input()
+        return self.manual_input()
 
-    def manual_proxy_input(self):
-        text, ok = QInputDialog.getText(self.ui_parent, "手动输入代理",
-                                        "自动检测代理失败，请输入代理前缀（例如：https://ghproxy.com/）:")
+    def manual_input(self):
+        text, ok = QInputDialog.getText(self.parent, "输入代理前缀", "自动检测失败，请输入代理前缀（如：https://gh-proxy.com/）:")
         if ok and text.strip():
             if self.test_proxy(text.strip()):
-                self.current_proxy_prefix = text.strip()
-                self.ui_parent.log(f"手动设置代理为: {text.strip()}")
+                self.current_proxy = text.strip()
+                self.parent.log(f"手动设置代理为：{text.strip()}")
                 return True
-            else:
-                QMessageBox.warning(self.ui_parent, "代理无效", "手动输入的代理不可用，请重试。")
-                return self.manual_proxy_input()
+            self.parent.log("代理测试失败，请重试")
+            QMessageBox.warning(self.parent, "无效代理", "代理测试失败，请重试")
+            return self.manual_input()
         else:
-            QMessageBox.warning(self.ui_parent, "操作取消", "未设置有效代理，可能影响下载速度。")
+            self.parent.log("未设置有效代理")
+            QMessageBox.warning(self.parent, "代理设置", "未设置代理，可能影响下载速度")
             return False
 
-# 配置文件写入和校验
+# --------- 动态服务器加载（多地址顺序尝试） ---------
+SERVER_LIST_URLS = [
+    "https://download.dnscrypt.info/resolvers-list/v3/public-resolvers.md",
+    "https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md",
+    "https://dnscrypt.info/resolvers-list/v3/public-resolvers.md"
+]
+
+def fetch_server_list(proxy_prefix):
+    for url in SERVER_LIST_URLS:
+        try:
+            use_url = proxy_prefix + url if proxy_prefix else url
+            r = requests.get(use_url, timeout=10)
+            if r.status_code == 200:
+                js = r.json()
+                servers = js.get("resolvers", [])
+                if servers:
+                    return servers
+        except:
+            continue
+    return []
+
+# --------- dnscrypt-proxy 下载安装 ---------
+class DNSCryptInstaller:
+    def __init__(self, parent, proxy_prefix=None):
+        self.parent = parent
+        self.proxy_prefix = proxy_prefix
+    
+    def get_releases(self):
+        url = "https://api.github.com/repos/DNSCrypt/dnscrypt-proxy/releases"
+        if self.proxy_prefix:
+            url = self.proxy_prefix + url
+        try:
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            self.parent.log(f"获取版本列表失败: {e}")
+            return []
+
+    def select_asset_url(self, release):
+        system = platform.system()
+        arch_map = {
+            "x86_64": "linux_amd64",
+            "amd64": "linux_amd64",
+            "aarch64": "linux_arm64",
+            "arm64": "linux_arm64",
+            "armv7l": "linux_arm"
+        }
+        arch = arch_map.get(platform.machine().lower())
+        if system == "Windows": arch = "windows_amd64"
+        elif system == "Darwin": arch = "darwin_amd64"
+        if not arch:
+            raise RuntimeError("不支持的CPU架构")
+        assets = release.get("assets", [])
+        for asset in assets:
+            name = asset.get("name", "")
+            if system == "Windows" and name.endswith(".zip") and arch in name:
+                return asset["browser_download_url"]
+            elif system in ("Linux", "Darwin") and name.endswith(".tar.gz") and arch in name:
+                return asset["browser_download_url"]
+        return None
+
+    def download_and_install(self):
+        releases = self.get_releases()
+        if not releases:
+            self.parent.log("无法获得任何发行版本信息")
+            QMessageBox.critical(self.parent, "错误", "获取dnscrypt-proxy版本列表失败。")
+            return
+        # 从最新到旧版本遍历尝试下载
+        for release in releases:
+            tag_name = release.get("tag_name", "")
+            self.parent.log(f"尝试下载版本：{tag_name}")
+            url = self.select_asset_url(release)
+            if not url:
+                self.parent.log(f"版本 {tag_name} 无适合的下载包，跳过")
+                continue
+            try:
+                tmp_dir = Path.home() / ".dnscrypt_proxy_tmp"
+                tmp_dir.mkdir(exist_ok=True)
+                file_name = url.split("/")[-1]
+                archive_path = tmp_dir / file_name
+                if not archive_path.exists():
+                    download_url = self.proxy_prefix + url if self.proxy_prefix else url
+                    self.parent.log(f"下载文件：{download_url}")
+                    with requests.get(download_url, stream=True, timeout=60) as r:
+                        r.raise_for_status()
+                        with open(archive_path, "wb") as f:
+                            shutil.copyfileobj(r.raw, f)
+                install_dir = Path.home() / "dnscrypt-proxy"
+                if install_dir.exists():
+                    shutil.rmtree(install_dir)
+                install_dir.mkdir()
+                self.parent.log(f"解压文件到：{install_dir}")
+                if archive_path.suffix == ".zip":
+                    with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                        zip_ref.extractall(install_dir)
+                else:
+                    with tarfile.open(archive_path, 'r:gz') as tar_ref:
+                        tar_ref.extractall(install_dir)
+                bin_path = next(install_dir.glob("dnscrypt-proxy*"))
+                if platform.system() in ("Linux", "Darwin"):
+                    bin_path.chmod(0o755)
+                self.parent.log(f"版本 {tag_name} 安装成功，路径：{bin_path}")
+                QMessageBox.information(self.parent, "安装成功", f"dnscrypt-proxy {tag_name} 安装完成")
+                return
+            except Exception:
+                self.parent.log(f"版本 {tag_name} 下载或安装失败，尝试回退到旧版本")
+                self.parent.log(traceback.format_exc())
+                continue
+        # 全部失败后提示
+        self.parent.log("所有尝试的版本下载失败")
+        QMessageBox.critical(self.parent, "错误", "所有尝试的dnscrypt-proxy版本下载失败，请检查网络或代理设置")
+
+
+
+    def extract(self, archive, outdir):
+        if archive.suffix == ".zip":
+            with zipfile.ZipFile(archive, 'r') as zip_ref:
+                zip_ref.extractall(outdir)
+        else:
+            with tarfile.open(archive, "r:gz") as tar_ref:
+                tar_ref.extractall(outdir)
+
+    def chmod_exec(self, path):
+        if platform.system() in ("Linux", "Darwin"):
+            path.chmod(0o755)
+
+    def install(self):
+        try:
+            self.parent.log("获取最新版本信息...")
+            release = self.get_latest()
+            url = self.select_asset_url(release)
+            self.parent.log(f"下载包链接：{url}")
+            tmpdir = Path.home() / ".dnscrypt_installer_tmp"
+            tmpdir.mkdir(exist_ok=True)
+            fname = url.split("/")[-1]
+            archpath = tmpdir / fname
+            if not archpath.exists():
+                self.parent.log("开始下载...")
+                self.download(url, archpath)
+                self.parent.log("下载完成")
+            inst_dir = Path.home() / "dnscrypt-proxy"
+            if inst_dir.exists():
+                shutil.rmtree(inst_dir)
+            inst_dir.mkdir()
+            self.parent.log("解压中...")
+            self.extract(archpath, inst_dir)
+            binfile = next(inst_dir.glob("dnscrypt-proxy*"))
+            self.chmod_exec(binfile)
+            self.parent.log(f"安装成功，目录：{inst_dir}")
+            QMessageBox.information(self.parent, "安装成功", f"dnscrypt-proxy安装完成至{inst_dir}")
+        except Exception as e:
+            self.parent.log(f"安装失败: {e}")
+            tb = traceback.format_exc()
+            self.parent.log(tb)
+            QMessageBox.critical(self.parent, "安装失败", f"dnscrypt-proxy安装失败: {e}")
+
+# --------- 服务器配置写入 ---------
 def write_server_names(config_path, server_names):
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
         found = False
-        new_lines = []
+        newlines = []
         for line in lines:
             if line.strip().startswith("server_names"):
-                new_lines.append('server_names = ["' + '","'.join(server_names) + '"]\n')
+                newlines.append('server_names = ["' + '","'.join(server_names) + '"]\n')
                 found = True
             else:
-                new_lines.append(line)
+                newlines.append(line)
         if not found:
-            new_lines.append('server_names = ["' + '","'.join(server_names) + '"]\n')
+            newlines.append('server_names = ["' + '","'.join(server_names) + '"]\n')
         with open(config_path, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+            f.writelines(newlines)
         return True, None
     except Exception as e:
         return False, str(e)
 
-def validate_config_file(config_path):
-    if not os.path.exists(config_path):
-        return False, "配置文件不存在"
-    with open(config_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    if "server_names" not in content:
-        return False, "配置文件缺少server_names字段"
-    return True, None
-
-def detect_dnscrypt_config_path():
+def detect_config_path():
     candidates = [
         "/etc/dnscrypt-proxy/dnscrypt-proxy.toml",
         "/usr/local/etc/dnscrypt-proxy/dnscrypt-proxy.toml",
@@ -118,186 +280,156 @@ def detect_dnscrypt_config_path():
             return p
     return None
 
-# 动态加载服务器列表（示范：https://some_online_source/api/servers.json）
-def fetch_servers(proxy_prefix=None):
-    url = "https://some_online_source/api/servers.json"  # 注意替换为有效地址
-    headers = {"User-Agent": "dnscrypt-proxy-gui"}
+# --------- 服务控制 ---------
+def run_cmd(cmd):
     try:
-        if proxy_prefix:
-            url = proxy_prefix + url
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-        return []
-    except Exception:
-        return []
+        r = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+        return r.returncode == 0, r.stdout + r.stderr
+    except Exception as e:
+        return False, str(e)
 
-# 主界面客户端
+# --------- UI主体 ---------
 class DNSCryptGui(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DNSCrypt GUI 客户端")
-        self.resize(1100, 750)
-
-        self.config_path = detect_dnscrypt_config_path()
+        self.setWindowTitle("DNSCrypt GUI客户端")
+        self.resize(1000, 700)
+        self.config_path = detect_config_path()
         self.proxy_manager = ProxyManager(self)
-
-        # 本地服务器列表，优先用在线源
+        self.manual_server = None
         self.servers = []
-        self.manual_server = None  # 手动指定服务器
+        self.installer = DNSCryptInstaller(self)
         self.init_ui()
-
-        # 启动线程自动设置代理和加载服务器
-        threading.Thread(target=self.setup_proxy_and_load_servers, daemon=True).start()
+        threading.Thread(target=self.startup_tasks, daemon=True).start()
 
     def init_ui(self):
-        main_layout = QVBoxLayout()
-
-        # 手动服务器输入
+        layout = QVBoxLayout()
+        self.manual_in = QLineEdit()
+        self.manual_in.setPlaceholderText("手动输入服务器host:port，优先级最高")
+        manual_btn = QPushButton("应用手动服务器")
+        manual_btn.clicked.connect(self.apply_manual_server)
         manual_layout = QHBoxLayout()
-        self.manual_server_input = QLineEdit()
-        self.manual_server_input.setPlaceholderText("手动输入服务器，格式 host:port ，优先级最高")
-        manual_apply_btn = QPushButton("应用手动服务器")
-        manual_apply_btn.clicked.connect(self.apply_manual_server)
-        manual_layout.addWidget(QLabel("手动服务器:"))
-        manual_layout.addWidget(self.manual_server_input)
-        manual_layout.addWidget(manual_apply_btn)
-        main_layout.addLayout(manual_layout)
+        manual_layout.addWidget(self.manual_in)
+        manual_layout.addWidget(manual_btn)
+        layout.addLayout(manual_layout)
 
-        # 服务器列表显示
-        server_layout = QVBoxLayout()
+        layout.addWidget(QLabel("在线服务器列表（多选）"))
         self.server_list = QListWidget()
         self.server_list.setSelectionMode(QListWidget.MultiSelection)
-        server_layout.addWidget(QLabel("自动获取的可用服务器"))
-        server_layout.addWidget(self.server_list)
-        main_layout.addLayout(server_layout)
+        layout.addWidget(self.server_list)
 
-        apply_btn = QPushButton("应用选择服务器配置（自动模式）")
-        apply_btn.clicked.connect(self.apply_selected_servers)
-        main_layout.addWidget(apply_btn)
+        apply_auto_btn = QPushButton("应用自动服务器配置")
+        apply_auto_btn.clicked.connect(self.apply_auto_servers)
+        layout.addWidget(apply_auto_btn)
 
-        # 服务控制按钮
-        service_layout = QHBoxLayout()
-        start_btn = QPushButton("启动服务")
-        stop_btn = QPushButton("停止服务")
-        restart_btn = QPushButton("重启服务")
-        start_btn.clicked.connect(self.start_service)
-        stop_btn.clicked.connect(self.stop_service)
-        restart_btn.clicked.connect(self.restart_service)
-        service_layout.addWidget(start_btn)
-        service_layout.addWidget(stop_btn)
-        service_layout.addWidget(restart_btn)
-        main_layout.addLayout(service_layout)
+        self.install_btn = QPushButton("下载并安装最新dnscrypt-proxy")
+        self.install_btn.clicked.connect(self.install_dnscrypt_proxy)
+        layout.addWidget(self.install_btn)
 
-        # 日志窗口
+        btn_layout = QHBoxLayout()
+        self.start_btn = QPushButton("启动服务")
+        self.stop_btn = QPushButton("停止服务")
+        self.restart_btn = QPushButton("重启服务")
+        self.start_btn.clicked.connect(lambda:self.run_service("start"))
+        self.stop_btn.clicked.connect(lambda:self.run_service("stop"))
+        self.restart_btn.clicked.connect(lambda:self.run_service("restart"))
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.stop_btn)
+        btn_layout.addWidget(self.restart_btn)
+        layout.addLayout(btn_layout)
+
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        main_layout.addWidget(self.log_text, stretch=2)
+        layout.addWidget(self.log_text, stretch=1)
+        self.setLayout(layout)
 
-        self.setLayout(main_layout)
+    def log(self,msg):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.log_text.append(f"[{ts}] {msg}")
+        print(msg)
 
-    def log(self, msg):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.log_text.append(f"[{timestamp}] {msg}")
-        print(msg)  # 可替换为文件日志等其他实现
+    def startup_tasks(self):
+        try:
+            self.log("自动检测代理...")
+            if not self.proxy_manager.auto_detect():
+                self.log("代理检测失败，未使用代理，下载可能不稳定")
+                self.installer.proxy_prefix = None
+            else:
+                self.installer.proxy_prefix = self.proxy_manager.current_proxy
 
-    def setup_proxy_and_load_servers(self):
-        self.log("开始自动检测并选择GitHub代理...")
-        if not self.proxy_manager.auto_select_proxy():
-            self.log("代理自动检测失败，未启用代理。")
-        # 优先使用代理获取服务器列表
-        self.servers = fetch_servers(self.proxy_manager.current_proxy_prefix)
-        if not self.servers:
-            self.log("在线获取服务器列表失败，使用本地备份服务器。")
-            self.servers = [
-                {"name": "cloudflare", "address": "one.one.one.one:53", "region": "Global"},
-                {"name": "dnscrypt.eu-nl", "address": "dnscrypt-eu.privacydns.org:443", "region": "EU"},
-                {"name": "quad9", "address": "dns.quad9.net:443", "region": "Global"},
-            ]
-        self.log(f"加载服务器共计 {len(self.servers)} 个。")
-        self.populate_server_list()
+            self.log("获取服务器列表，多地址尝试...")
+            servers = fetch_server_list(self.installer.proxy_prefix)
+            if not servers:
+                self.log("所有地址尝试失败，使用本地备份服务器")
+                servers = [
+                    {"name": "cloudflare", "address": "one.one.one.one:53"},
+                    {"name": "dnscrypt.eu-nl", "address": "dnscrypt-eu.privacydns.org:443"},
+                    {"name": "quad9", "address": "dns.quad9.net:443"},
+                ]
+            self.servers = servers
+            self.populate_serverlist()
+        except Exception as e:
+            self.log(f"启动异常: {e}")
+            self.log(traceback.format_exc())
 
-    def populate_server_list(self):
+    def populate_serverlist(self):
         self.server_list.clear()
         for s in self.servers:
-            item = QListWidgetItem(f"{s['name']} ({s.get('region','N/A')}) - {s['address']}")
-            item.setData(Qt.UserRole, s)
+            item = QListWidgetItem(f"{s['name']} - {s['address']}")
+            item.setData(Qt.UserRole,s)
             item.setSelected(True)
             self.server_list.addItem(item)
 
     def apply_manual_server(self):
-        server = self.manual_server_input.text().strip()
-        if not server:
-            QMessageBox.warning(self, "输入错误", "请输入合法的服务器地址，如 host:port 。")
+        srv = self.manual_in.text().strip()
+        if not srv:
+            QMessageBox.warning(self, "警告", "请输入有效服务器地址")
             return
-        self.manual_server = server
-        self.log(f"已设置手动服务器：{server}")
-        success = self.apply_server_config([{"name": "manual", "address": server}])
+        self.manual_server = srv
+        self.log(f"应用手动服务器: {srv}")
+        success, err = write_server_names(self.config_path, [srv])
         if success:
-            QMessageBox.information(self, "成功", f"已应用手动服务器：{server}")
+            QMessageBox.information(self, "成功", "手动服务器配置应用成功")
         else:
-            QMessageBox.warning(self, "失败", "应用手动服务器失败，将尝试自动模式。")
-            self.manual_server = None
+            QMessageBox.critical(self, "失败", f"写入失败: {err}")
 
-    def apply_selected_servers(self):
-        selected_servers = []
-        for i in range(self.server_list.count()):
-            item = self.server_list.item(i)
-            if item.isSelected():
-                data = item.data(Qt.UserRole)
-                selected_servers.append(data)
-        if not selected_servers:
-            QMessageBox.warning(self, "配置错误", "请至少选择一个服务器！")
-            self.log("未选择服务器，无法配置。")
+    def apply_auto_servers(self):
+        selected = [
+            self.server_list.item(i).data(Qt.UserRole)['name']
+            for i in range(self.server_list.count())
+            if self.server_list.item(i).isSelected()
+        ]
+        if not selected:
+            QMessageBox.warning(self, "警告", "请至少选择一个服务器")
             return
-        self.manual_server = None  # 清除手动服务器
-        success = self.apply_server_config(selected_servers)
+        self.manual_server = None
+        self.log(f"应用自动服务器: {selected}")
+        success, err = write_server_names(self.config_path, selected)
         if success:
-            QMessageBox.information(self, "成功", "服务器配置已应用，请重启dnscrypt-proxy使改动生效。")
+            QMessageBox.information(self, "成功", "自动服务器配置应用成功")
         else:
-            QMessageBox.warning(self, "失败", "服务器配置应用失败。")
+            QMessageBox.critical(self, "失败", f"写入失败: {err}")
 
-    def apply_server_config(self, server_list):
-        if not self.config_path:
-            self.log("未找到dnscrypt-proxy配置文件路径，无法写入！")
-            return False
-        try:
-            server_names = [s["name"] for s in server_list if "name" in s]
-            success, err = write_server_names(self.config_path, server_names)
-            if success:
-                self.log(f"写入服务器配置成功：{server_names}")
-                return True
-            else:
-                self.log(f"写入服务器配置失败：{err}")
-                return False
-        except Exception as e:
-            self.log(f"应用服务器配置异常：{e}")
-            return False
+    def install_dnscrypt_proxy(self):
+        def _install():
+            self.install_btn.setEnabled(False)
+            try:
+                self.installer.install()
+            finally:
+                self.install_btn.setEnabled(True)
+        threading.Thread(target=_install, daemon=True).start()
 
-    # 服务控制相关示范代码，根据你的dnscrypt-proxy路径和启动命令调整
-    def start_service(self):
-        service_cmd = ["systemctl", "start", "dnscrypt-proxy"]
-        self.run_service_command(service_cmd, "启动")
+    def run_service(self, action):
+        ok, out = run_cmd(f"sudo systemctl {action} dnscrypt-proxy")
+        if ok:
+            self.log(f"服务{action}成功")
+            QMessageBox.information(self, "通知", f"服务{action}成功")
+        else:
+            self.log(f"服务{action}失败: {out}")
+            QMessageBox.warning(self, "错误", f"服务{action}失败: {out}")
 
-    def stop_service(self):
-        service_cmd = ["systemctl", "stop", "dnscrypt-proxy"]
-        self.run_service_command(service_cmd, "停止")
-
-    def restart_service(self):
-        service_cmd = ["systemctl", "restart", "dnscrypt-proxy"]
-        self.run_service_command(service_cmd, "重启")
-
-    def run_service_command(self, cmd, action_name):
-        try:
-            subprocess.run(cmd, check=True)
-            self.log(f"服务{action_name}成功")
-            QMessageBox.information(self, "服务控制", f"服务{action_name}成功！")
-        except subprocess.CalledProcessError as e:
-            self.log(f"服务{action_name}失败: {e}")
-            QMessageBox.critical(self, "服务控制错误", f"服务{action_name}失败: {e}")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = DNSCryptGui()
-    window.show()
+    gui = DNSCryptGui()
+    gui.show()
     sys.exit(app.exec_())
