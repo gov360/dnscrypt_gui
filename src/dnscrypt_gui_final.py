@@ -104,8 +104,12 @@ class DNSCryptGui(QWidget):
         ]
         self.github_proxies = [
             {"name": "直连", "type": "http", "host": "direct", "port": 0},
-            {"name": "GitHub-CNPMJS", "type": "http", "host": "github.com.cnpmjs.org", "port": 80},
-            {"name": "FastGit", "type": "http", "host": "hub.fastgit.org", "port": 443}
+            {"name": "jasonzeng", "type": "http", "host": "gh.jasonzeng.dev", "port": 443},
+            {"name": "gitmirror", "type": "http", "host": "hub.gitmirror.com", "port": 443},
+            {"name": "pipers", "type": "http", "host": "proxy.pipers.cn", "port": 443},
+            {"name": "gh-proxy", "type": "http", "host": "gh-proxy.com", "port": 443},
+            {"name": "dgithub", "type": "http", "host": "dgithub.xyz", "port": 443}
+
         ]
         self.active_proxy = self.github_proxies[0]
 
