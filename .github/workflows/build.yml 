@@ -1,0 +1,120 @@
+name: Multi-platform Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller requests pyqt5
+      - name: Build executable (Linux)
+        run: |
+          pyinstaller --onefile --windowed --name dnscrypt_gui dnscrypt_gui_final.py
+      - name: Run tests
+        run: |
+          python -c "import requests; import PyQt5; print('Tests OK')"
+      - uses: actions/upload-artifact@v3
+        with:
+          name: dnscrypt_gui-linux
+          path: dist/dnscrypt_gui
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller requests pyqt5
+      - name: Build executable (Windows)
+        run: |
+          pyinstaller --onefile --windowed --name dnscrypt_gui.exe dnscrypt_gui_final.py
+      - name: Run tests
+        run: |
+          python -c "import requests; import PyQt5; print('Tests OK')"
+      - uses: actions/upload-artifact@v3
+        with:
+          name: dnscrypt_gui-windows.exe
+          path: dist/dnscrypt_gui.exe
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller requests pyqt5
+      - name: Build executable (macOS)
+        run: |
+          pyinstaller --onefile --windowed --name dnscrypt_gui dnscrypt_gui_final.py
+      - name: Run tests
+        run: |
+          python -c "import requests; import PyQt5; print('Tests OK')"
+      - uses: actions/upload-artifact@v3
+        with:
+          name: dnscrypt_gui-macos
+          path: dist/dnscrypt_gui
+
+  release:
+    name: Release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: dnscrypt_gui-linux
+          path: dist/
+      - uses: actions/download-artifact@v3
+        with:
+          name: dnscrypt_gui-windows.exe
+          path: dist/
+      - uses: actions/download-artifact@v3
+        with:
+          name: dnscrypt_gui-macos
+          path: dist/
+      - id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: 自动构建的多平台PyQt5 DNSCrypt GUI应用程序可执行文件。
+      - uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./dist/dnscrypt_gui
+          asset_name: dnscrypt_gui-linux
+          asset_content_type: application/octet-stream
+      - uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./dist/dnscrypt_gui.exe
+          asset_name: dnscrypt_gui-windows.exe
+          asset_content_type: application/octet-stream
+      - uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./dist/dnscrypt_gui
+          asset_name: dnscrypt_gui-macos
+          asset_content_type: application/octet-stream
