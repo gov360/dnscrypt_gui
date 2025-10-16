@@ -18,6 +18,21 @@ from PyQt5.QtWidgets import (
     QInputDialog
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QTextCursor
+from PyQt5.QtCore import pyqtSignal, QObject
+from PyQt5 import sip
+
+# 注册自定义类型
+
+if __name__ == "__main__":
+    # 注册QTextCursor，保证多线程信号队列正确传递
+    sip.register_metatype("QTextCursor<QTextCursor>")
+    
+    app = QApplication(sys.argv)
+    # 你的主窗口
+    window = DNSCryptGui()
+    window.show()
+    sys.exit(app.exec_())
 
 # --------- 依赖检测与安装 ---------
 def run_cmd(cmd):
