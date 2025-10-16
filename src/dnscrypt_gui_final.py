@@ -30,19 +30,71 @@ def ensure_dependencies():
 ensure_dependencies()
 
 # 代理测试函数
-def test_proxy(proxy, test_url="https://raw.githubusercontent.com/github/gitignore/main/README.md"):
-    if proxy.get("host") == "direct":
-        proxies = None
-    else:
-        proxy_str = f"{proxy['type']}://{proxy['host']}:{proxy['port']}"
-        proxies = {"http": proxy_str, "https": proxy_str}
-    start = time.time()
-    try:
-        resp = requests.get(test_url, proxies=proxies, timeout=8, headers={"User-Agent":"proxy-test"})
-        latency = int((time.time() - start) * 1000)
-        return resp.status_code == 200, latency
-    except Exception:
-        return False, None
+class ProxyManager:
+    def __init__(self, ui_parent: QWidget):
+        self.ui_parent = ui_parent
+        self.proxy_list = [
+            {"name": "GitHubProxy", "prefix": "https://gh-proxy.com/"},
+            {"name": "FastGit", "prefix": "https://gh.jasonzeng.dev/"},
+            {"name": "pipers", "prefix": "https://proxy.pipers.cn/"},
+            {"name": "gitmirror", "prefix": "https://hub.gitmirror.com/"},
+            {"name": "dgithub", "prefix": "https://dgithub.xyz/"}
+        ]
+        self.current_proxy_prefix = None
+
+    def test_proxy(self, proxy_prefix):
+        test_url = "https://api.github.com/repos/jedisct1/dnscrypt-proxy/releases/latest"
+        proxied_url = proxy_prefix + test_url
+        try:
+            resp = requests.get(proxied_url, timeout=5)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    def auto_select_proxy(self):
+        for proxy in self.proxy_list:
+            if self.test_proxy(proxy["prefix"]):
+                self.current_proxy_prefix = proxy["prefix"]
+                self.ui_parent.log(f"自动选择有效代理: {proxy['name']}")
+                return True
+        # 所有检测失败，弹窗输入
+        return self.manual_proxy_input()
+
+    def manual_proxy_input(self):
+        text, ok = QInputDialog.getText(self.ui_parent, "手动输入代理",
+                                        "自动检测代理失败，请输入代理前缀（例如：https://ghproxy.com/）:")
+        if ok and text.strip():
+            if self.test_proxy(text.strip()):
+                self.current_proxy_prefix = text.strip()
+                self.ui_parent.log(f"手动设置代理为: {text.strip()}")
+                return True
+            else:
+                QMessageBox.warning(self.ui_parent, "代理无效", "手动输入的代理不可用，请重试。")
+                return self.manual_proxy_input()
+        else:
+            QMessageBox.warning(self.ui_parent, "操作取消", "未设置有效代理，可能影响下载速度。")
+            return False
+
+# 用法示范（与主界面类集成）：
+
+class DNSCryptGui(QWidget):
+    def __init__(self):
+        super().__init__()
+        # ... 初始化代码 ...
+        self.proxy_manager = ProxyManager(self)
+
+    def log(self, msg):
+        # 日志打印实现
+        print(msg)  # 可替换成GUI日志窗口输出
+
+    def on_check_and_set_proxy(self):
+        success = self.proxy_manager.auto_select_proxy()
+        if not success:
+            self.log("未能设置有效代理")
+
+# 示例调用
+# gui = DNSCryptGui()
+# gui.on_check_and_set_proxy()
 
 # 配置文件写入与校验
 def write_server_names(config_path, server_names):
