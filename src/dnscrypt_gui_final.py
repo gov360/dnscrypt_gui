@@ -154,15 +154,7 @@ class DNSCryptGui(QWidget):
             {"name": "dnscrypt.eu-nl", "address": "dnscrypt-eu.privacydns.org:443", "region": "EU"},
             {"name": "quad9", "address": "dns.quad9.net:443", "region": "Global"}
         ]
-        self.github_proxies = [
-            {"name": "直连", "type": "http", "host": "direct", "port": 0},
-            {"name": "jasonzeng", "type": "http", "host": "gh.jasonzeng.dev", "port": 443},
-            {"name": "gitmirror", "type": "http", "host": "hub.gitmirror.com", "port": 443},
-            {"name": "pipers", "type": "http", "host": "proxy.pipers.cn", "port": 443},
-            {"name": "gh-proxy", "type": "http", "host": "gh-proxy.com", "port": 443},
-            {"name": "dgithub", "type": "http", "host": "dgithub.xyz", "port": 443}
-
-        ]
+      
         self.active_proxy = self.github_proxies[0]
 
         self.init_ui()
