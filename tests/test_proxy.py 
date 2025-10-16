@@ -1,0 +1,91 @@
+import unittest
+import tempfile
+import os
+import time
+from datetime import datetime
+import shutil
+import requests
+
+# 代理测试函数
+def test_proxy(proxy, test_url="https://www.google.com"):
+    proxies = None
+    if proxy.get("host") != "direct":
+        ptype = proxy.get("type", "http")
+        host = proxy.get("host")
+        port = proxy.get("port")
+        proxy_str = f"{ptype}://{host}:{port}"
+        proxies = {"http": proxy_str, "https": proxy_str}
+    start = time.time()
+    try:
+        response = requests.get(test_url, proxies=proxies, timeout=5)
+        latency = int((time.time() - start) * 1000)
+        return response.status_code == 200, latency
+    except Exception:
+        return False, None
+
+# 配置写入函数，覆盖写server_names字段
+def write_server_names(path, server_names):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        new_lines = []
+        found = False
+        for line in lines:
+            if line.strip().startswith("server_names"):
+                new_lines.append('server_names = ["' + '","'.join(server_names) + '"]\n')
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append('server_names = ["' + '","'.join(server_names) + '"]\n')
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+class TestDnscryptProxy(unittest.TestCase):
+    def setUp(self):
+        # 创建临时目录和配置文件，模拟dnscrypt-proxy.toml
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_path = os.path.join(self.temp_dir, "dnscrypt-proxy.toml")
+        sample_content = (
+            "listen_addresses = ['127.0.0.1:53']\n"
+            "server_names = ['oldserver']\n"
+            "bootstrap_resolvers = ['8.8.8.8:53']\n"
+        )
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(sample_content)
+    
+    def tearDown(self):
+        # 删除临时目录
+        shutil.rmtree(self.temp_dir)
+
+    def test_write_server_names_success(self):
+        servers = ["server1", "server2"]
+        success, err = write_server_names(self.config_path, servers)
+        self.assertTrue(success)
+        self.assertIsNone(err)
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn('server_names = ["server1","server2"]', content)
+
+    def test_write_server_names_file_not_exist(self):
+        bad_path = os.path.join(self.temp_dir, "not_exist.toml")
+        success, err = write_server_names(bad_path, ["a"])
+        self.assertFalse(success)
+        self.assertIsNotNone(err)
+
+    def test_proxy_direct_success(self):
+        proxy = {"name": "direct", "type": "http", "host": "direct", "port": 0}
+        success, latency = test_proxy(proxy, "https://httpbin.org/get")
+        self.assertTrue(success)
+        self.assertIsInstance(latency, int)
+
+    def test_proxy_bad_proxy(self):
+        proxy = {"name": "badproxy", "type": "http", "host": "127.0.0.1", "port": 9999}
+        success, latency = test_proxy(proxy)
+        self.assertFalse(success)
+
+if __name__ == "__main__":
+    unittest.main()
